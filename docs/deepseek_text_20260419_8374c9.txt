@@ -1,0 +1,430 @@
+2. Создание виртуального окружения
+bash
+
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# или
+venv\Scripts\activate     # Windows
+
+3. Установка зависимостей
+
+CrABook автоматически установит все необходимые пакеты при первом запуске:
+bash
+
+python crabook.py --help
+
+Основные зависимости:
+
+    torch — PyTorch для нейросетей
+
+    ruaccent — расстановка ударений
+
+    natasha / spacy — синтаксический анализ
+
+    scipy — обработка аудио
+
+    pyloudnorm — нормализация LUFS
+
+    noisereduce — шумоподавление
+
+4. Установка FFmpeg
+bash
+
+# Ubuntu/Debian
+sudo apt install ffmpeg
+
+# Arch Linux
+sudo pacman -S ffmpeg
+
+# macOS
+brew install ffmpeg
+
+# Windows
+# Скачать с https://ffmpeg.org/download.html
+
+🚀 Быстрый старт
+Самый простой запуск
+
+    Поместите файл книги в папку book/
+
+    Запустите:
+
+bash
+
+python crabook.py
+
+CrABook автоматически:
+
+    Найдёт файл в папке book/
+
+    Обработает текст
+
+    Создаст SSML-разметку
+
+    Сгенерирует аудио
+
+    Сохранит результат в audio/название_книги.m4a
+
+Примеры использования
+bash
+
+# Указать конкретный файл
+python crabook.py -i book/my_book.txt
+
+# Указать выходной файл
+python crabook.py -i book/my_book.txt -o audio/my_audiobook.m4a
+
+# Выбрать голос
+python crabook.py -v eugene
+
+# Изменить жанр (влияет на паузы)
+python crabook.py -g drama
+
+# Сгенерировать в MP3
+python crabook.py --format mp3 --bitrate 128k
+
+# Параллельная генерация с 8 потоками
+python crabook.py -w 8
+
+# Режим отладки
+python crabook.py --debug VERBOSE
+
+📁 Поддерживаемые форматы
+Входные форматы
+Формат	Расширение	Поддержка
+Текст	.txt	✅ Всегда
+Word	.docx	✅
+FictionBook	.fb2	✅
+EPUB	.epub	✅
+PDF	.pdf	✅
+Выходные форматы
+Формат	Расширение	Битрейт по умолчанию
+AAC	.m4a	64 kbps
+MP3	.mp3	128 kbps
+WAV	.wav	Без сжатия
+🏗️ Архитектура
+
+CrABook построен по принципам MVC (Model-View-Controller) с чётким разделением ответственности:
+text
+
+crabook.py (Controller)
+    │
+    ├── core/               # Ядро системы
+    │   ├── debug_core.py   # Система отладки
+    │   ├── dependency_manager.py  # Управление зависимостями
+    │   ├── config_manager.py      # Управление конфигурацией
+    │   ├── context.py      # Контекст выполнения
+    │   └── pipeline.py     # Конвейер обработки
+    │
+    ├── services/           # Сервисы (бизнес-логика)
+    │   ├── text_preparation.py    # Подготовка текста и SSML
+    │   ├── ssml_validation.py     # Валидация SSML
+    │   └── audio_generation.py    # Генерация аудио
+    │
+    ├── engines/            # Движки (низкоуровневая обработка)
+    │   ├── text_cleaner.py      # Очистка текста
+    │   ├── accent_engine.py     # Расстановка ударений
+    │   ├── ssml_builder.py      # Построение SSML
+    │   ├── tts_engine.py        # Синтез речи
+    │   └── audio_processor.py   # Обработка аудио
+    │
+    ├── models/             # Модели данных
+    │   ├── book.py         # Модель книги
+    │   ├── ssml_chunk.py   # Модель SSML-чанка
+    │   └── audio_chunk.py  # Модель аудио-чанка
+    │
+    └── utils/              # Утилиты
+        ├── file_utils.py   # Работа с файлами
+        ├── text_utils.py   # Работа с текстом
+        └── audio_utils.py  # Работа с аудио
+
+Поток обработки
+text
+
+Входной файл
+    │
+    ▼
+[1] TextPreparationService
+    ├── Извлечение текста
+    ├── Очистка
+    ├── Расстановка ударений
+    ├── Преобразование чисел
+    └── Генерация SSML
+    │
+    ▼
+[2] SSMLValidationService
+    ├── Проверка валидности
+    └── Автоисправление ошибок
+    │
+    ▼
+[3] AudioGenerationService
+    ├── Разбиение на чанки
+    ├── Параллельная генерация (TTS)
+    ├── Постобработка (De-esser, NR, Normalization)
+    ├── Объединение чанков
+    └── Конвертация в целевой формат
+    │
+    ▼
+Выходной аудиофайл
+
+⚙️ Конфигурация
+
+Все настройки хранятся в JSON-файлах в папке config/.
+Основной конфиг: config/default_settings.json
+json
+
+{
+  "tts": {
+    "default_voice": "xenia",
+    "default_sample_rate": 24000,
+    "default_bitrate": "64k",
+    "default_chunk_size": 900,
+    "default_workers": 4
+  },
+  "audio_processing": {
+    "enable_lowpass_filter": false,
+    "enable_deesser": true,
+    "deesser_threshold": -32.0,
+    "deesser_center_freq": 5500,
+    "enable_spectral_nr": true,
+    "spectral_nr_amount": 0.12,
+    "enable_normalization": true,
+    "target_volume": -23.0
+  },
+  "pause_config": {
+    "paragraph": 800,
+    "dialog_change": 450,
+    "exclamation": 350,
+    "question": 350,
+    "comma_long": 200,
+    "enumeration": 120,
+    "chapter": 1500
+  }
+}
+
+Конфигурация конкретной книги
+
+Создайте файл book_specific/название_книги.json:
+json
+
+{
+  "accents": {
+    "звонит": "звон+ит",
+    "торты": "т+орты"
+  },
+  "abbreviations": {
+    "ООО": "Общество с ограниченной ответственностью"
+  },
+  "manual_fixes": {
+    "неправильное слово": "правильное слово"
+  },
+  "custom_effects": {
+    "дракон": "loud",
+    "шепот": "whisper"
+  }
+}
+
+Словари
+Файл	Назначение
+accent_overrides.json	Глобальные переопределения ударений
+abbreviations.json	Расшифровка аббревиатур
+keywords_effects.json	Эффекты для ключевых слов
+emotions.json	Эмоциональная окраска
+📋 Аргументы командной строки
+Основные параметры
+Аргумент	Описание	По умолчанию
+-i, --input	Входной файл	Автопоиск в book/
+-o, --output	Выходной файл	audio/название.m4a
+-g, --genre	Жанр книги	fiction
+-v, --voice	Голос TTS	xenia
+Параметры обработки
+Аргумент	Описание	По умолчанию
+-c, --chunk-size	Размер чанка в символах	900
+-w, --workers	Количество потоков	4
+--split-chapters	Разбить на главы	false
+--skip-validation	Пропустить валидацию	false
+Параметры вывода
+Аргумент	Описание	По умолчанию
+--format	Формат: aac, mp3, wav	aac
+--formats	Несколько форматов	—
+-b, --bitrate	Битрейт	64k/128k
+-sr, --sample-rate	Частота дискретизации	24000
+--no-convert	Не конвертировать (оставить WAV)	false
+Аудио постобработка
+Аргумент	Описание
+--lowpass	Включить low-pass фильтр
+--lowpass-cutoff	Частота среза (Гц)
+--no-deesser	Отключить de-esser
+--deesser-threshold	Порог de-esser (dB)
+--no-spectral-nr	Отключить шумоподавление
+--spectral-nr-amount	Степень шумоподавления
+--no-normalize	Отключить нормализацию
+--target-volume	Целевая громкость (LUFS)
+Отладка
+Аргумент	Описание
+--debug	Уровень: ERROR, WARN, INFO, VERBOSE, DEBUG, TRACE
+--no-debug-log	Не сохранять лог в файл
+--config-dir	Папка с конфигурациями
+--book-config	JSON с настройками для книги
+📚 Туториал
+Шаг 1: Подготовка книги
+
+Поместите файл книги в папку book/. Например, book/war_and_peace.txt.
+Шаг 2: Базовый запуск
+bash
+
+python crabook.py
+
+CrABook найдёт файл, обработает его и создаст audio/war_and_peace.m4a.
+Шаг 3: Настройка под книгу
+
+Создайте файл book_specific/war_and_peace.json:
+json
+
+{
+  "accents": {
+    "Болконский": "Болк+онский",
+    "Безухов": "Без+ухов"
+  },
+  "custom_effects": {
+    "война": "loud",
+    "любовь": "soft"
+  }
+}
+
+Шаг 4: Выбор голоса и жанра
+bash
+
+python crabook.py -v eugene -g drama
+
+Шаг 5: Оптимизация для длинной книги
+bash
+
+python crabook.py -c 1200 -w 8 --format mp3 --bitrate 96k
+
+    -c 1200 — увеличиваем размер чанка
+
+    -w 8 — больше потоков для ускорения
+
+    --format mp3 — меньший размер файла
+
+Шаг 6: Отладка при проблемах
+bash
+
+python crabook.py --debug VERBOSE
+
+Логи сохранятся в logs/debug_*.log, а промежуточные файлы — в logs/debug_chunk_*.txt.
+Шаг 7: Тонкая настройка аудио
+
+Если звук кажется резким:
+bash
+
+python crabook.py --deesser-threshold -35
+
+Если есть фоновый шум:
+bash
+
+python crabook.py --spectral-nr-amount 0.2
+
+Если звук слишком громкий/тихий:
+bash
+
+python crabook.py --target-volume -20
+
+📂 Структура проекта
+text
+
+crabook/
+├── crabook.py              # Главный оркестратор
+├── README.md               # Этот файл
+│
+├── core/                   # Ядро системы
+│   ├── debug_core.py
+│   ├── dependency_manager.py
+│   ├── config_manager.py
+│   ├── context.py
+│   ├── exceptions.py
+│   └── pipeline.py
+│
+├── services/               # Сервисы
+│   ├── text_preparation.py
+│   ├── ssml_validation.py
+│   └── audio_generation.py
+│
+├── engines/                # Движки
+│   ├── text_cleaner.py
+│   ├── accent_engine.py
+│   ├── ssml_builder.py
+│   ├── tts_engine.py
+│   └── audio_processor.py
+│
+├── models/                 # Модели
+│   ├── book.py
+│   ├── ssml_chunk.py
+│   └── audio_chunk.py
+│
+├── utils/                  # Утилиты
+│   ├── file_utils.py
+│   ├── text_utils.py
+│   └── audio_utils.py
+│
+├── config/                 # Конфигурации
+│   ├── default_settings.json
+│   ├── accent_overrides.json
+│   ├── abbreviations.json
+│   ├── keywords_effects.json
+│   └── emotions.json
+│
+├── book/                   # Входные файлы
+├── book_specific/          # Конфиги для конкретных книг
+├── audio/                  # Выходные аудиофайлы
+└── logs/                   # Логи отладки
+
+🔧 Решение проблем
+❌ "Модуль не найден"
+
+CrABook автоматически устанавливает зависимости. Если ошибка сохраняется:
+bash
+
+pip install -r requirements.txt
+
+❌ "FFmpeg не найден"
+
+Установите FFmpeg (см. Установка).
+❌ "Empty prosody tag"
+
+Включите автоисправление SSML:
+bash
+
+python crabook.py --debug INFO
+
+❌ "Дребезг в аудио"
+
+Проверьте настройки нормализации:
+bash
+
+python crabook.py --target-volume -23 --no-deesser --no-spectral-nr
+
+❌ "Слишком медленно"
+
+    Увеличьте количество потоков: -w 8
+
+    Увеличьте размер чанка: -c 1500
+
+    Используйте GPU: установите CUDA-совместимый PyTorch
+
+❌ "Ошибка валидации SSML"
+
+Проверьте логи в logs/ и файлы чанков в logs/debug_chunk_*.txt.
+📄 Лицензия
+
+MIT License — свободное использование, модификация и распространение.
+🙏 Благодарности
+
+    Silero Team — за отличную TTS модель
+
+    Natasha — за синтаксический анализ
+
+    RUAccent — за расстановку ударений
+
+CrABook — создавай аудиокниги легко и профессионально! 🎧

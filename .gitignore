@@ -1,0 +1,4 @@
+*.onnx
+*.pt
+mvc/models/ruaccent/
+mvc/models/ruaccent/nn/
