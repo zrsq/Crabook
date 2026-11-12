@@ -59,15 +59,20 @@ class AudioGenerationService:
         self._cleanup_old_temp_dirs()
     
     @staticmethod
-    def _cleanup_old_temp_dirs():
-        """Удаляет старые временные директории при старте"""
-        import tempfile
-        from pathlib import Path
-        
+    def _cleanup_old_temp_dirs(max_age_hours: float = 24.0):
+        """
+        FIX BUG-9: удаляет только СТАРЫЕ (>24ч) временные директории.
+        Раньше сносились все audiobook_* — включая каталоги параллельно
+        работающего второго инстанса.
+        """
+        import time
+
         temp_root = Path(tempfile.gettempdir())
+        now = time.time()
         for old_dir in temp_root.glob("audiobook_*"):
             try:
-                shutil.rmtree(old_dir)
+                if now - old_dir.stat().st_mtime > max_age_hours * 3600:
+                    shutil.rmtree(old_dir, ignore_errors=True)
             except Exception:
                 pass
     
@@ -146,7 +151,9 @@ class AudioGenerationService:
             output_path = self._temp_dir / f"chunk_{chunk.index:04d}.wav"
             jobs.append((chunk, output_path))
         
-        workers = self.context.options.workers
+        # FIX BUG-5: options.workers может быть None -> executor брал
+        # min(32, cpu+4) потоков вместо конфигурационных 4.
+        workers = self.context.get_effective_workers()
         
         if self.context.is_debug_mode():
             # Последовательная генерация в режиме отладки
@@ -208,59 +215,58 @@ class AudioGenerationService:
         return audio_chunks
     
     def _generate_parallel(self, jobs: List[Tuple], workers: int) -> List[AudioChunk]:
-        """Параллельная генерация чанков"""
-        audio_chunks = []
+        """
+        Параллельная генерация чанков.
+        FIX BUG-5: воркер создаёт и мутирует СВОЙ объект AudioChunk,
+        главный поток только читает результат — общей изменяемой памяти нет.
+        (Сам вызов Silero дополнительно сериализован Lock'ом в TTSEngine.)
+        """
+        results_by_index = {}
         futures = {}
         
         with ThreadPoolExecutor(max_workers=workers) as executor:
             for chunk, output_path in jobs:
-                audio_chunk = AudioChunk(
-                    ssml_content=chunk.content,
-                    index=chunk.index,
-                    chapter_index=chunk.chapter_index,
-                    status=AudioChunkStatus.PENDING
-                )
-                audio_chunks.append(audio_chunk)
-                
                 future = executor.submit(
                     self._generate_single_chunk,
-                    chunk.content,
+                    chunk,
                     output_path,
-                    audio_chunk
                 )
-                futures[future] = audio_chunk
+                futures[future] = chunk.index
             
             completed = 0
             for future in as_completed(futures):
-                audio_chunk = futures[future]
+                index = futures[future]
                 try:
-                    updated_chunk = future.result()
-                    # Обновляем оригинальный чанк
-                    audio_chunk.status = updated_chunk.status
-                    audio_chunk.wav_path = updated_chunk.wav_path
-                    audio_chunk.duration_seconds = updated_chunk.duration_seconds
-                    audio_chunk.error = updated_chunk.error
-                    
-                    completed += 1
-                    self.debug.log(f"Прогресс TTS: {completed}/{len(jobs)}", level='VERBOSE')
-                    
+                    audio_chunk = future.result()
                 except Exception as e:
-                    audio_chunk.status = AudioChunkStatus.FAILED
-                    audio_chunk.error = str(e)
-                    self.debug.log_error(f"Ошибка в параллельном чанке", e)
+                    audio_chunk = AudioChunk(
+                        ssml_content="",
+                        index=index,
+                        status=AudioChunkStatus.FAILED,
+                        error=str(e),
+                    )
+                    self.debug.log_error(f"Ошибка в параллельном чанке {index}", e)
+                results_by_index[index] = audio_chunk
+                completed += 1
+                self.debug.log(f"Прогресс TTS: {completed}/{len(jobs)}", level='VERBOSE')
             
             # Сборка мусора после параллельной генерации
             gc.collect()
         
-        return audio_chunks
+        # Возвращаем в исходном порядке
+        return [results_by_index[chunk.index] for chunk, _ in jobs]
     
-    def _generate_single_chunk(self, ssml: str, output_path: Path, 
-                               audio_chunk: AudioChunk) -> AudioChunk:
-        """Генерирует один чанк (для параллельного выполнения)"""
-        audio_chunk.status = AudioChunkStatus.GENERATING
+    def _generate_single_chunk(self, chunk: SSMLChunk, output_path: Path) -> AudioChunk:
+        """Генерирует один чанк. Объект AudioChunk — локальный для потока."""
+        audio_chunk = AudioChunk(
+            ssml_content=chunk.content,
+            index=chunk.index,
+            chapter_index=chunk.chapter_index,
+            status=AudioChunkStatus.GENERATING
+        )
         
         try:
-            success = self.tts_engine.generate(ssml, output_path)
+            success = self.tts_engine.generate(chunk.content, output_path)
             if success:
                 audio_chunk.status = AudioChunkStatus.COMPLETED
                 audio_chunk.wav_path = output_path
@@ -323,35 +329,42 @@ class AudioGenerationService:
 
         temp_combined = self._temp_dir / f"{output_path.stem}.combined.wav"
 
-        try:
-            from pydub import AudioSegment
+        # PERF FIX: старая версия держала ВСЮ книгу в RAM через
+        # AudioSegment += (квадратичное копирование, ~10 ГБ на час аудио).
+        # Теперь: микро-фейды применяются к каждому чанку отдельно (ffmpeg,
+        # потоково), затем concat demuxer с -c copy — O(1) по памяти.
+        import subprocess
 
-            combined = AudioSegment.empty()
-            fade_ms = 10
+        fade_sec = 0.01
+        faded_files = []
 
-            for wav_file in wav_files:
-                segment = AudioSegment.from_wav(str(wav_file))
-                segment = segment.fade_in(fade_ms).fade_out(fade_ms)
-                combined += segment
+        for i, wav_file in enumerate(wav_files):
+            faded_path = self._temp_dir / f"chunk_{i:04d}.faded.wav"
+            info = self.audio_utils.get_wav_info(wav_file)
+            duration = info[2] if info else 0.0
+            fade_out_start = max(duration - fade_sec, 0)
 
-            combined.export(temp_combined, format="wav")
+            cmd = [
+                "ffmpeg", "-i", str(wav_file),
+                "-af", f"afade=t=in:d={fade_sec},afade=t=out:st={fade_out_start}:d={fade_sec}",
+                "-y", str(faded_path),
+            ]
+            try:
+                subprocess.run(cmd, capture_output=True, check=True)
+                faded_files.append(faded_path)
+            except Exception as e:
+                self.debug.log_warning(f"Фейд чанка {i} не применён ({e}), беру исходный")
+                faded_files.append(wav_file)
 
+        if self.audio_utils.concat_wav_files(faded_files, temp_combined):
             self.debug.log(f"✅ Чанки объединены с фейдами: {temp_combined}", level='INFO')
-
             info = self.audio_utils.get_wav_info(temp_combined)
             if info:
                 self.audio_book.final_duration_seconds = info[2]
-
             return temp_combined
 
-        except ImportError:
-            self.debug.log_warning("pydub не установлен, использую обычное объединение")
-            if self.audio_utils.concat_wav_files(wav_files, temp_combined):
-                info = self.audio_utils.get_wav_info(temp_combined)
-                if info:
-                    self.audio_book.final_duration_seconds = info[2]
-                return temp_combined
-            return None
+        self.debug.log_error("Не удалось объединить чанки")
+        return None
     
     @debug_trace
     def convert_to_format(self, input_path: Path, output_path: Path,

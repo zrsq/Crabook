@@ -11,7 +11,13 @@ from typing import List, Tuple
 
 class TextUtils:
     """Утилиты для обработки текста"""
-    
+
+    # FIX: маркеры защиты точек/дефисов. Раньше '<.>' и '<->' удалялись
+    # любым strip_tags как XML-теги вместе с точками. Символы Private
+    # Use Area не встречаются в книгах и не похожи на теги.
+    DOT_MARK = '\ue000'
+    DASH_MARK = '\ue001'
+
     def __init__(self):
         pass
     
@@ -157,21 +163,27 @@ class TextUtils:
         for abbr in abbreviations:
             # Экранируем точки и заменяем на временный маркер
             pattern = abbr.replace('.', r'\.')
-            replacement = abbr.replace('.', '<.>')
+            replacement = abbr.replace('.', self.DOT_MARK)
             text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
         
         # Заменяем "г-н", "г-жа"
-        text = text.replace("г-н", "г<->н")
-        text = text.replace("г-жа", "г<->жа")
+        text = text.replace("г-н", f"г{self.DASH_MARK}н")
+        text = text.replace("г-жа", f"г{self.DASH_MARK}жа")
         
         # Заменяем числа с точкой (1.5, 3.14)
-        text = re.sub(r'(\d)\.(\d)', r'\1<.>\2', text)
+        text = re.sub(r'(\d)\.(\d)', rf'\1{self.DOT_MARK}\2', text)
         
-        # Заменяем инициалы (А.С., И.И.)
-        text = re.sub(r'([А-ЯЁA-Z])\.([А-ЯЁA-Z])', r'\1<.>\2', text, flags=re.IGNORECASE)
-        
-        # Заменяем инициалы с пробелом (А. С.)
-        text = re.sub(r'([А-ЯЁA-Z])\.\s+([А-ЯЁA-Z])', r'\1<.> \2', text, flags=re.IGNORECASE)
+        # FIX BUG-3: убран re.IGNORECASE — с ним [А-ЯЁ] матчил и строчные,
+        # из-за чего ЛЮБАЯ граница "слово. Слово" склеивалась в одно предложение.
+        # Инициалы без пробела: "А.С." — обе буквы заглавные.
+        text = re.sub(r'\b([А-ЯЁA-Z])\.([А-ЯЁA-Z])\.',
+                      rf'\1{self.DOT_MARK}\2{self.DOT_MARK}', text)
+        # Инициал с пробелом: "А. С. Пушкин". Требуем одиночную заглавную
+        # (перед ней НЕ буква), чтобы не съесть границу "Конец. Начало".
+        text = re.sub(
+            r'(?<![А-Яа-яЁёA-Za-z])([А-ЯЁA-Z])\.\s+(?=[А-ЯЁA-Z](?:[.<]|[а-яёa-z]))',
+            rf'\1{self.DOT_MARK} ', text
+        )
         
         # Разбиваем по .!?...
         sentences = re.split(r'(?<=[.!?…])\s+', text)
@@ -181,8 +193,8 @@ class TextUtils:
         for s in sentences:
             s = s.strip()
             # Восстанавливаем точки
-            s = s.replace("<.>", ".")
-            s = s.replace("<->", "-")
+            s = s.replace(self.DOT_MARK, ".")
+            s = s.replace(self.DASH_MARK, "-")
             
             # Убираем лишние пробелы
             s = re.sub(r'\s+', ' ', s)
@@ -192,6 +204,33 @@ class TextUtils:
                 
         return processed_sentences
     
+    def split_sentences_tagged(self, text: str) -> List[str]:
+        """
+        FIX BUG-2: разбивает текст С SSML-тегами на предложения,
+        не разрывая теги и не теряя разметку. Каждый тег заменяется
+        плейсхолдером без точек, применяется split_sentences к
+        «скелету», затем теги возвращаются на место.
+        """
+        if not text:
+            return []
+
+        placeholders = []
+
+        def _stash(m):
+            placeholders.append(m.group(0))
+            return f'\ue010{len(placeholders) - 1}\ue011'
+
+        skeleton = re.sub(r'<[^>]+>', _stash, text)
+        sentences = self.split_sentences(skeleton)
+
+        restored = []
+        for s in sentences:
+            s = re.sub(r'\ue010(\d+)\ue011',
+                       lambda m: placeholders[int(m.group(1))], s)
+            if s.strip():
+                restored.append(s.strip())
+        return restored
+
     # ==================== СТАТИЧЕСКИЕ МЕТОДЫ (вызываются через TextUtils.method) ====================
     
     @staticmethod

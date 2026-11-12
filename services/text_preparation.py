@@ -198,23 +198,6 @@ class TextPreparationService:
         """Удаляет все XML/SSML теги, оставляя только чистый текст."""
         return re.sub(r'<[^>]+>', '', text)
 
-    def _find_original_chunk(self, clean_chunk: str, full_text: str) -> str:
-        """
-        Находит оригинальный фрагмент в полном тексте (с тегами),
-        соответствующий чистому чанку.
-        """
-        # Упрощённый подход: ищем первое вхождение чистого текста в полном тексте
-        # Это работает, потому что чистый текст — это тот же текст, но без тегов
-        clean_chunk_escaped = re.escape(clean_chunk)
-        pattern = re.compile(clean_chunk_escaped)
-        
-        match = pattern.search(full_text)
-        if match:
-            return match.group(0)
-        
-        # Если не нашли (например, из-за пробелов), возвращаем чистый чанк
-        return clean_chunk
-
     @debug_trace
     def _build_ssml_for_chunk(self, chunk_text: str) -> str:
         """Строит SSML для одного чанка."""
@@ -225,30 +208,35 @@ class TextPreparationService:
             raise SSMLBuildError(f"Ошибка построения SSML: {e}") from e
 
     @debug_trace
-    def prepare_chunks(self, chunk_size: int = 400) -> List[SSMLChunk]:
+    def prepare_chunks(self, chunk_size: int = None) -> List[SSMLChunk]:
         """
-        Разбивает текст на чанки:
-        1. Нарезает ЧИСТЫЙ текст (без тегов) по предложениям.
-        2. Для каждого чанка находит соответствующий фрагмент в ОРИГИНАЛЬНОМ тексте (с тегами).
-        3. Строит SSML из оригинального фрагмента.
+        FIX BUG-2: разбивает текст С ТЕГАМИ на чанки по предложениям.
+
+        Старая реализация нарезала чистый текст и пыталась найти его
+        в тексте с тегами через re.search — совпадение было невозможно,
+        если внутри чанка есть хоть один тег, и вся SSML-разметка
+        (ударения, числа, эффекты) молча терялась.
+
+        Теперь предложения получаются из split_sentences_tagged(),
+        а размер чанка считается по длине ЧИСТОГО текста (без тегов).
         """
         if not self.final_processed_text:
             raise ValueError("Сначала вызови process()")
 
-        # 1. Получаем чистый текст (без тегов) для нарезки
-        clean_text = self._strip_tags(self.final_processed_text)
+        # FIX BUG-8: размер чанка берём из CLI/конфига через контекст
+        if chunk_size is None:
+            chunk_size = self.context.get_effective_chunk_size()
 
-        # 2. Разбиваем чистый текст на предложения
-        sentences = self.text_utils.split_sentences(clean_text)
+        sentences = self.text_utils.split_sentences_tagged(self.final_processed_text)
 
         if not sentences:
             self.debug.log_warning("Не удалось разбить текст на предложения, создаю один чанк")
-            sentences = [clean_text]
+            sentences = [self.final_processed_text]
 
         self.debug.log(f"Текст разбит на {len(sentences)} предложений", level='INFO')
 
-        # 3. Группируем предложения в чанки (по чистому тексту)
-        clean_chunks = []
+        # Группируем предложения в чанки по длине чистого текста
+        text_chunks = []
         current_batch = []
         current_len = 0
 
@@ -257,43 +245,48 @@ class TextPreparationService:
             if not sent:
                 continue
 
-            if current_len + len(sent) > chunk_size and current_batch:
-                clean_chunks.append(" ".join(current_batch))
+            plain_len = len(self._strip_tags(sent))
+
+            if current_len + plain_len > chunk_size and current_batch:
+                text_chunks.append(" ".join(current_batch))
                 current_batch = []
                 current_len = 0
 
             current_batch.append(sent)
-            current_len += len(sent)
+            current_len += plain_len
 
         if current_batch:
-            clean_chunks.append(" ".join(current_batch))
+            text_chunks.append(" ".join(current_batch))
 
-        self.debug.log(f"Предложения сгруппированы в {len(clean_chunks)} чанков", level='INFO')
+        self.debug.log(f"Предложения сгруппированы в {len(text_chunks)} чанков", level='INFO')
 
-        # 4. Для каждого чистого чанка находим оригинальный текст (с тегами) и строим SSML
+        # Строим SSML для каждого чанка (теги уже внутри — не теряются)
         ssml_chunks = []
-        full_text = self.final_processed_text
-        
-        for i, clean_chunk in enumerate(clean_chunks):
-            # Находим оригинальный фрагмент
-            original_chunk = self._find_original_chunk(clean_chunk, full_text)
-            
-            # Строим SSML
-            ssml_content = self._build_ssml_for_chunk(original_chunk)
-            
-            # Сохраняем для отладки
-            chunk_path = Path("logs") / f"debug_chunk_{i:04d}.txt"
-            with open(chunk_path, 'w', encoding='utf-8') as f:
-                f.write(ssml_content)
-            
+        dump_debug = self.debug.should_log("DEBUG")
+        if dump_debug:
+            Path("logs").mkdir(exist_ok=True)
+
+        for i, chunk_text in enumerate(text_chunks):
+            ssml_content = self._build_ssml_for_chunk(chunk_text)
+
+            # FIX: дамп чанков только в режиме DEBUG (раньше писался всегда —
+            # тысячи файлов на книгу даже без --debug)
+            if dump_debug:
+                chunk_path = Path("logs") / f"debug_chunk_{i:04d}.txt"
+                with open(chunk_path, 'w', encoding='utf-8') as f:
+                    f.write(ssml_content)
+                self.debug.log(f"Чанк {i} сохранён: {chunk_path}", level='DEBUG')
+
             chunk = SSMLChunk(content=ssml_content, index=i)
             ssml_chunks.append(chunk)
-            self.debug.log(f"Чанк {i} сохранён: {chunk_path}", level='VERBOSE')
 
-        # Обновляем контекст
+        # Обновляем контекст (word_count сохраняем, чтобы не пересчитывать)
         self.context.ssml_chunks = [
-            {'index': c.index, 'content': c.content} for c in ssml_chunks
+            {'index': c.index, 'content': c.content, 'word_count': c.word_count}
+            for c in ssml_chunks
         ]
+        # Сохраняем полный SSML для этапа валидации
+        self.context.ssml_text = "\n".join(c.content for c in ssml_chunks)
 
         self.debug.log(f"✅ Создано {len(ssml_chunks)} валидных чанков с SSML-разметкой", level='INFO')
         return ssml_chunks

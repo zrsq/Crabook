@@ -168,14 +168,17 @@ class AudiobookOrchestrator:
             config=self.config,
         )
 
-        # Загружаем конфиг книги если есть
-        book_config_path = self.find_book_config(input_path.stem)
-        if book_config_path:
-            self.config.load_book_config(config_path=book_config_path)
-            context.book_config = self.config.book_config
-            self.debug.log(
-                f"📖 Загружен конфиг книги: {book_config_path}", level="INFO"
-            )
+        # Загружаем конфиг книги если есть.
+        # FIX BUG-7: НЕ перезатираем явно указанный --book-config,
+        # который main() уже загрузил в self.config.book_config.
+        if self.config.book_config is None:
+            book_config_path = self.find_book_config(input_path.stem)
+            if book_config_path:
+                self.config.load_book_config(config_path=book_config_path)
+                self.debug.log(
+                    f"📖 Загружен конфиг книги: {book_config_path}", level="INFO"
+                )
+        context.book_config = self.config.book_config
 
         # Определяем режим выполнения
         if self.debug.should_log("VERBOSE"):

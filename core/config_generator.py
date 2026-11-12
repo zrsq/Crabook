@@ -27,7 +27,7 @@ class AutoConfigGenerator:
         # Основной конфиг
         default_config = self._generate_default_settings()
         generated["default_settings.json"] = self._save_config(
-            self.config_dir / "default_settings.json", default_config
+            "default_settings.json", default_config
         )
         
         # Конфиг ударений (пример)
@@ -79,6 +79,7 @@ class AutoConfigGenerator:
     def _save_config(self, filename: str, config: Dict) -> Path:
         """Сохраняет конфиг в файл"""
         filepath = self.config_dir / filename
+        filepath.parent.mkdir(parents=True, exist_ok=True)
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
         return filepath
@@ -284,7 +285,7 @@ class AutoConfigGenerator:
             "_comment": "Fallback конфиг - сгенерирован без доступа к исходным классам",
             "tts": {
                 "default_voice": "xenia",
-                "default_chunk_size": 900,
+                "default_chunk_size": 500,
                 "default_workers": 4,
                 "default_sample_rate": 24000,
                 "default_bitrate": "64k"

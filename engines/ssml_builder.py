@@ -112,7 +112,9 @@ class SSMLBuilder:
         return ssml_text
 
     def _process_paragraph(self, paragraph: str, parent_elem):
-        if re.match(r'^\s*[—\-]', paragraph):
+        # FIX BUG-12: не создаём вложенные <prosody>, если абзац уже
+        # содержит prosody-разметку (Silero ругается на вложенность).
+        if re.match(r'^\s*[—\-]', paragraph) and '<prosody' not in paragraph:
             prosody = etree.SubElement(parent_elem, self.PROSODY)
             prosody.set("pitch", "medium")
             prosody.set("rate", "105%")
@@ -140,16 +142,15 @@ class SSMLBuilder:
                 parser = etree.XMLParser(recover=True, remove_blank_text=True)
                 fragment = etree.fromstring(wrapped.encode('utf-8'), parser=parser)
 
-                for child in fragment.getchildren():
-                    parent_elem.append(child)
-
-                if fragment.tail:
-                    self._append_text(parent_elem, fragment.tail)
-                elif fragment.text and not list(fragment):
+                # FIX BUG-1: текст ДО первого дочернего тега терялся,
+                # т.к. добавлялся только при отсутствии детей.
+                if fragment.text:
                     self._append_text(parent_elem, fragment.text)
 
-                if len(fragment) > 0 and fragment[-1].tail:
-                    self._append_text(parent_elem, fragment[-1].tail)
+                # append() переносит и tail каждого ребёнка — отдельно
+                # добавлять хвосты не нужно (это дублировало текст).
+                for child in fragment.getchildren():
+                    parent_elem.append(child)
 
                 return
             except Exception:
@@ -177,6 +178,36 @@ class SSMLBuilder:
 
         return text
 
+    @staticmethod
+    def _split_protected_blocks(text: str) -> List[str]:
+        """
+        FIX BUG-12: разбивает текст на блоки с учётом ВЛОЖЕННОСТИ
+        <say-as>/<prosody>. Старый non-greedy regex матчил до первого
+        закрывающего тега и ломал разметку на вложенных prosody.
+        """
+        parts = TextUtils.split_by_tags(text)
+        blocks, buf, depth = [], [], 0
+        for part in parts:
+            is_open = bool(re.match(r'<(say-as|prosody)(?:\s[^>]*)?>$', part))
+            is_close = bool(re.match(r'</(say-as|prosody)>$', part))
+            if depth > 0:
+                buf.append(part)
+                if is_open:
+                    depth += 1
+                elif is_close:
+                    depth -= 1
+                    if depth == 0:
+                        blocks.append("".join(buf))
+                        buf = []
+            elif is_open:
+                depth = 1
+                buf = [part]
+            else:
+                blocks.append(part)
+        if buf:
+            blocks.append("".join(buf))
+        return blocks
+
     def _process_long_words_in_text(self, text: str) -> str:
         """Применяет prosody rate='90%' к длинным словам (>=9 букв)."""
         def repl(match):
@@ -187,28 +218,16 @@ class SSMLBuilder:
                 return f'<prosody rate="90%">{word}</prosody>'
             return word
 
-        protected_pattern = r'<(say-as|prosody)[^>]*>.*?</\1>'
-
         result_parts = []
-        last_end = 0
-        for match in re.finditer(protected_pattern, text, re.DOTALL):
-            before = text[last_end:match.start()]
-            if before:
-                parts = TextUtils.split_by_tags(before)
+        for block in self._split_protected_blocks(text):
+            if block.startswith('<say-as') or block.startswith('<prosody'):
+                result_parts.append(block)
+            else:
+                parts = TextUtils.split_by_tags(block)
                 for i, part in enumerate(parts):
                     if not part.startswith('<'):
                         parts[i] = re.sub(r'\b[А-Яа-яёЁ]+\b', repl, part)
                 result_parts.append("".join(parts))
-            result_parts.append(match.group(0))
-            last_end = match.end()
-
-        if last_end < len(text):
-            before = text[last_end:]
-            parts = TextUtils.split_by_tags(before)
-            for i, part in enumerate(parts):
-                if not part.startswith('<'):
-                    parts[i] = re.sub(r'\b[А-Яа-яёЁ]+\b', repl, part)
-            result_parts.append("".join(parts))
 
         result = "".join(result_parts)
         # Удаляем пустые теги prosody
@@ -286,23 +305,21 @@ class NumbersToSayAs:
         parts = TextUtils.split_by_tags(text)
         for i, part in enumerate(parts):
             if not part.startswith("<"):
-                parts[i] = re.sub(r"\b\d[\d\s]{3,}\b", number_repl, part)
+                # FIX BUG-13: старый паттерн захватывал хвостовой пробел
+                # ("1984 ") и склеивал слова. Теперь: группы по 3 цифры
+                # через пробел ИЛИ 4+ цифр подряд.
+                parts[i] = re.sub(
+                    r"\b\d{1,3}(?: \d{3})+\b|\b\d{4,}\b", number_repl, part
+                )
         text = "".join(parts)
 
-        protected_pattern = r'<(say-as|prosody)[^>]*>.*?</\1>'
-
+        # FIX BUG-12: сбалансированная защита вложенных тегов
         result_parts = []
-        last_end = 0
-        for match in re.finditer(protected_pattern, text, re.DOTALL):
-            before = text[last_end:match.start()]
-            if before:
-                result_parts.append(self._process_long_words_safe(before))
-            result_parts.append(match.group(0))
-            last_end = match.end()
-
-        if last_end < len(text):
-            result_parts.append(self._process_long_words_safe(text[last_end:]))
-
+        for block in SSMLBuilder._split_protected_blocks(text):
+            if block.startswith('<say-as') or block.startswith('<prosody'):
+                result_parts.append(block)
+            else:
+                result_parts.append(self._process_long_words_safe(block))
         return "".join(result_parts)
 
     def _process_long_words_safe(self, text: str) -> str:

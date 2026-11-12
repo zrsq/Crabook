@@ -1,0 +1,46 @@
+{
+  "_comment": "================================================================================",
+  "_description": "Основной файл настроек CrABook. Автоматически сгенерирован.",
+  "_version": "8.0",
+  "_auto_generated": true,
+  "tts": {
+    "default_voice": "xenia",
+    "default_sample_rate": 24000,
+    "default_bitrate": "64k",
+    "default_chunk_size": 500,
+    "default_workers": 4
+  },
+  "audio_processing": {
+    "enable_lowpass_filter": false,
+    "lowpass_cutoff_freq": 4000,
+    "enable_deesser": true,
+    "deesser_threshold": -32.0,
+    "deesser_center_freq": 5500,
+    "deesser_q": 0.6,
+    "enable_spectral_nr": true,
+    "spectral_nr_amount": 0.12,
+    "enable_room_tone": false,
+    "room_tone_level": -70.0,
+    "enable_normalization": true,
+    "target_volume": -23.0
+  },
+  "processing": {
+    "default_genre": "fiction",
+    "split_chapters": false
+  },
+  "pause_config": {
+    "paragraph": 800,
+    "dialog_change": 450,
+    "exclamation": 350,
+    "question": 350,
+    "comma_long": 200,
+    "enumeration": 120,
+    "chapter": 1500
+  },
+  "ssml": {
+    "use_ssml": true,
+    "enable_emotions": true,
+    "enable_question_markup": true,
+    "enable_exclamation_markup": true
+  }
+}
