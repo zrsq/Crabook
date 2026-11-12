@@ -70,6 +70,10 @@ class DependencyManager:
         "num2words": DependencyInfo(
             "num2words", "num2words", "num2words", required=False
         ),
+        # FIX: импортируются напрямую в engines/services, но отсутствовали
+        # в списке — при чистом окружении проект падал на ImportError.
+        "lxml": DependencyInfo("lxml", "lxml", "lxml", required=True),
+        "pydub": DependencyInfo("pydub", "pydub", "pydub", required=False),
     }
 
     _instance = None
@@ -90,46 +94,24 @@ class DependencyManager:
         self._load_all()
 
     @debug_trace
-    def _install_package(self, package_name: str) -> bool:
-        """Устанавливает пакет через pip"""
-        try:
-            self.debug.log(f"📦 Установка пакета: {package_name}", level="INFO")
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "-q", package_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            self.debug.log(f"✅ Пакет установлен: {package_name}", level="VERBOSE")
-            return True
-        except Exception as e:
-            self.debug.log_error(f"Ошибка установки {package_name}", e)
-            return False
-
-    @debug_trace
     def _safe_import(self, info: DependencyInfo) -> Tuple[bool, Any, Optional[str]]:
-        """Безопасный импорт модуля с автоматической установкой"""
+        """
+        Безопасный импорт модуля.
+        FIX SEC-2: убрана молчаливая автоустановка через pip при импорте —
+        она засоряла окружение, ставила несовместимые версии (torch!)
+        и падала в PEP 668-окружениях. Теперь — понятная ошибка с командой.
+        """
         try:
             module = importlib.import_module(info.import_path)
             self.debug.log(f"✅ Импортирован: {info.module_name}", level="VERBOSE")
             return True, module, None
         except ImportError as e:
-            if info.package_name:
-                self.debug.log(
-                    f"⚠️ {info.module_name} не найден, установка...", level="INFO"
-                )
-                if self._install_package(info.package_name):
-                    try:
-                        module = importlib.import_module(info.import_path)
-                        return True, module, None
-                    except ImportError as e2:
-                        error_msg = f"Не удалось импортировать после установки: {e2}"
-                        return False, None, error_msg
-                else:
-                    error_msg = f"Не удалось установить пакет {info.package_name}"
-                    return False, None, error_msg
-            else:
-                error_msg = f"Модуль не найден: {e}"
-                return False, None, error_msg
+            hint = (
+                f"Установите зависимости: uv pip install -r requirements.txt "
+                f"(или: pip install {info.package_name})"
+            )
+            error_msg = f"Модуль не найден: {e}. {hint}"
+            return False, None, error_msg
 
     @debug_trace
     def _load_all(self):
@@ -161,14 +143,11 @@ class DependencyManager:
                 self.debug.log(
                     "✅ Модель spaCy ru_core_news_sm загружена", level="VERBOSE"
                 )
-            except:
-                self.debug.log(
-                    "📦 Загрузка модели spaCy ru_core_news_sm...", level="INFO"
-                )
-                subprocess.check_call(
-                    [sys.executable, "-m", "spacy", "download", "ru_core_news_sm"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+            except Exception:
+                # FIX SEC-2: не скачиваем модель молча — только подсказка.
+                self.debug.log_warning(
+                    "Модель spaCy не найдена. Установите: "
+                    "python -m spacy download ru_core_news_sm"
                 )
 
         # Специальная обработка ONNX для ruaccent
@@ -190,9 +169,15 @@ class DependencyManager:
 
                 ort.InferenceSession._orig_run = ort.InferenceSession.run
                 ort.InferenceSession.run = patched_run
-                self.debug.log("✅ ONNX хак применён", level="VERBOSE")
-        except Exception:
-            pass
+                # FIX SEC-3: логируем версию и факт применения патча
+                self.debug.log(
+                    f"✅ ONNX token_type_ids патч применён (ort {ort.__version__})",
+                    level="VERBOSE",
+                )
+        except ImportError:
+            pass  # onnxruntime не установлен — ruaccent сам сообщит
+        except Exception as e:
+            self.debug.log_warning(f"ONNX патч не применён: {e}")
 
         self.debug.log_stage("Загрузка зависимостей", "end")
         self._print_summary()

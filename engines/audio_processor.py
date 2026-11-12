@@ -128,11 +128,19 @@ class AudioProcessor:
                 current_file = normalized
                 temp_files.append(normalized)
 
-        # Копируем результат в output_path если нужно
+        # Копируем результат в output_path если нужно.
+        # FIX BUG-14: при выключенных фильтрах current_file == input_path;
+        # если он же и output_path — copy2 бросал SameFileError.
         if current_file != output_path:
             import shutil
+            import os
 
-            shutil.copy2(str(current_file), str(output_path))
+            same = (
+                output_path.exists()
+                and os.path.samefile(str(current_file), str(output_path))
+            )
+            if not same:
+                shutil.copy2(str(current_file), str(output_path))
 
         # Удаляем временные файлы
         for temp in temp_files:

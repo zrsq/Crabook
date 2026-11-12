@@ -143,7 +143,7 @@ class ExecutionContext:
             return self.options.chunk_size
         if self.config and hasattr(self.config, 'tts_config'):
             return self.config.tts_config.default_chunk_size
-        return 400
+        return 500  # FIX BUG-8: согласовано с TTSConfig.default_chunk_size
 
     def get_effective_workers(self) -> int:
         if self.options.workers:

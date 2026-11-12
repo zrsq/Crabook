@@ -37,7 +37,9 @@ class TTSConfig:
     default_voice: str = "xenia"
     default_sample_rate: int = 24000
     default_bitrate: str = "64k"
-    default_chunk_size: int = 900
+    # FIX BUG-8: было 900 — с SSML-тегами легко превысить лимит Silero (~1000).
+    # Единый согласованный дефолт: 500 символов ЧИСТОГО текста на чанк.
+    default_chunk_size: int = 500
     default_workers: int = 4
 
     @classmethod

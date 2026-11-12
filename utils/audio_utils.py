@@ -61,20 +61,17 @@ class AudioUtils:
         Получает информацию о WAV файле.
         Возвращает (sample_rate, channels, duration_seconds).
         """
-        if not self.deps.is_available("scipy.io.wavfile"):
-            return None
+        # PERF FIX: читаем только ЗАГОЛОВОК через stdlib wave (O(1)),
+        # а не весь файл через scipy (сотни МБ на длинных чанках).
+        import wave
 
         try:
-            rate, data = self.deps.wavfile.read(str(wav_path))
+            with wave.open(str(wav_path), "rb") as wf:
+                rate = wf.getframerate()
+                channels = wf.getnchannels()
+                samples = wf.getnframes()
 
-            if len(data.shape) > 1:
-                channels = data.shape[1]
-                samples = data.shape[0]
-            else:
-                channels = 1
-                samples = len(data)
-
-            duration = samples / rate
+            duration = samples / rate if rate else 0.0
 
             self.debug.log_audio_info(str(wav_path), duration, rate, channels)
             return rate, channels, duration
@@ -188,11 +185,13 @@ class AudioUtils:
         if not self.is_ffmpeg_available():
             return False
 
-        # Создаём файл со списком
+        # Создаём файл со списком.
+        # FIX SEC-4: экранируем одинарные кавычки в путях для ffmpeg concat.
         list_file = output_path.with_suffix(".txt")
-        with open(list_file, "w") as f:
+        with open(list_file, "w", encoding="utf-8") as f:
             for wav in wav_files:
-                f.write(f"file '{wav.absolute()}'\n")
+                escaped = str(wav.absolute()).replace("'", r"'\''")
+                f.write(f"file '{escaped}'\n")
 
         cmd = [
             "ffmpeg",
@@ -392,6 +391,7 @@ class AudioUtils:
         """Добавляет комнатный тон (pink noise)"""
         if not (
             self.deps.is_available("scipy.io.wavfile")
+            and self.deps.is_available("scipy.signal")
             and self.deps.is_available("numpy")
         ):
             return False
@@ -402,19 +402,13 @@ class AudioUtils:
             rate, data = self.deps.wavfile.read(str(input_path))
             audio_float = data.astype(np.float32) / 32768.0
 
+            # PERF FIX: тот же IIR-фильтр розового шума, но векторизованно
+            # через lfilter (C-цикл) вместо Python-цикла по миллионам сэмплов.
             samples = len(audio_float)
             white = np.random.normal(0, 1, samples)
-            pink = np.zeros_like(white)
-
-            b0, b1, b2 = 0.99765, -1.98553, 0.98788
-            a1, a2 = -1.98553, 0.98788
-
-            x1 = x2 = y1 = y2 = 0
-            for i in range(samples):
-                y0 = b0 * white[i] + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
-                pink[i] = y0
-                x2, x1 = x1, white[i]
-                y2, y1 = y1, y0
+            b = [0.99765, -1.98553, 0.98788]
+            a = [1.0, -1.98553, 0.98788]
+            pink = self.deps.scipy_signal.lfilter(b, a, white)
 
             pink = pink / np.std(pink) * 0.1 * (10 ** (tone_level_db / 20))
             mixed = audio_float + pink
