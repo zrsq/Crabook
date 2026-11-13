@@ -51,6 +51,7 @@ class AudioGenerationService:
         
         # Аудиокнига
         self.audio_book = AudioBook()
+        self.output_files: List[Path] = []
         
         # Временная директория
         self._temp_dir: Optional[Path] = None
@@ -394,56 +395,66 @@ class AudioGenerationService:
         """
         # 1. Генерация
         audio_chunks = self.generate_from_ssml(ssml_chunks)
-        
-        # Проверяем, что есть готовые чанки
+
         ready_count = sum(1 for c in audio_chunks if c.is_ready)
         if ready_count == 0:
             raise TTSGenerationError("Ни один чанк не был сгенерирован")
-        
+
         self.debug.log(f"Сгенерировано {ready_count}/{len(audio_chunks)} чанков", level='INFO')
-        
+
         # 2. Определяем выходной путь
         output_path = self.context.output_path
         if not output_path:
             output_path = Path("audio") / f"{self.context.input_path.stem}.m4a"
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # 3. Объединение (если больше одного чанка)
         if len(audio_chunks) > 1:
             combined = self.combine_chunks(audio_chunks, output_path)
         else:
             combined = audio_chunks[0].processed_path or audio_chunks[0].wav_path
-        
+
         if not combined:
             raise AudioProcessingError("Не удалось объединить чанки")
-        
-        # 4. Конвертация
+
+        # 4. Конвертация — собираем ВСЕ созданные файлы
+        self.output_files = []
+        final_path = None
+
         if self.context.options.no_convert:
             final_path = output_path.with_suffix('.wav')
             shutil.copy2(str(combined), str(final_path))
             self.context.final_output = final_path
-        else:
-            audio_format = self.context.options.output_format
-            
-            if self.context.options.output_formats:
-                final_path = None
-                for fmt in self.context.options.output_formats:
-                    fmt_path = self.convert_to_format(combined, output_path, fmt)
-                    if fmt_path and not final_path:
+            self.output_files.append(final_path)
+        elif self.context.options.output_formats:
+            for fmt in self.context.options.output_formats:
+                fmt_path = self.convert_to_format(combined, output_path, fmt)
+                if fmt_path:
+                    self.output_files.append(fmt_path)
+                    if final_path is None:
                         final_path = fmt_path
-            else:
-                final_path = self.convert_to_format(combined, output_path, audio_format)
+            if self.output_files:
+                self.context.final_output = self.output_files[0]
+        else:
+            final_path = self.convert_to_format(
+                combined, output_path, self.context.options.output_format
+            )
+            if final_path:
+                self.output_files.append(final_path)
 
-        # 5. Сохранение метаданных
-        if final_path and final_path.exists():
-            self._save_metadata(final_path)
+        # 5. Метаданные — во ВСЕ созданные форматы
+        for path in self.output_files:
+            if path and path.exists():
+                self._save_metadata(path)
+
+        self.context.metadata['output_files'] = [str(p) for p in self.output_files]
 
         # 6. Очистка временных файлов
         if not self.context.is_debug_mode():
             self._cleanup_all_temp_files(audio_chunks, combined)
         else:
             self.debug.log(f"🐛 Режим отладки: временные файлы сохранены в {self._temp_dir}", level='INFO')
-        
+
         return final_path
 
     def _save_metadata(self, audio_path: Path):

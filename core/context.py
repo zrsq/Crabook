@@ -36,6 +36,7 @@ class ProcessingOptions:
     workers: Optional[int] = None
     split_chapters: bool = False
     skip_validation: bool = False
+    per_line: bool = False
     no_convert: bool = False
     output_format: AudioFormat = AudioFormat.AAC
     output_formats: List[AudioFormat] = field(default_factory=list)

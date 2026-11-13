@@ -25,6 +25,8 @@ from services.text_preparation import TextPreparationService
 from services.ssml_validation import SSMLValidationService
 from services.audio_generation import AudioGenerationService
 from models.ssml_chunk import SSMLChunk
+from utils.file_utils import FileUtils
+from utils.naming import translit_slug
 
 
 class AudiobookOrchestrator:
@@ -314,6 +316,10 @@ class AudiobookOrchestrator:
             elif not input_path.exists():
                 raise FileNotFoundError(f"Файл не найден: {input_path}")
 
+            # Построчный режим: каждая строка -> отдельный файл
+            if options is not None and options.per_line:
+                return self.run_per_line(input_path, output_path, options)
+
             # 2. Создаём контекст
             self.context = self.create_context(input_path, output_path, options)
 
@@ -353,7 +359,9 @@ class AudiobookOrchestrator:
         print(f"   Голос: {self.context.get_effective_voice()}")
 
         # Формат
-        if self.context.options.output_formats:
+        if self.context.options.no_convert:
+            print("   Формат: WAV (без конвертации)")
+        elif self.context.options.output_formats:
             formats = ", ".join(f.value.upper() for f in self.context.options.output_formats)
             print(f"   Форматы: {formats}")
         else:
@@ -378,26 +386,29 @@ class AudiobookOrchestrator:
         print("✅ АУДИОКНИГА ГОТОВА!")
         print("=" * 60)
 
-        if self.context and self.context.final_output:
-            print(f"   📁 Файл: {self.context.final_output}")
+        outputs = []
+        if self._audio_service is not None:
+            outputs = list(getattr(self._audio_service, "output_files", []) or [])
+        if not outputs and self.context and self.context.final_output:
+            outputs = [self.context.final_output]
 
-            if self.context.final_output.exists():
-                size_mb = self.context.final_output.stat().st_size / (1024 * 1024)
-                print(f"   💾 Размер: {size_mb:.2f} MB")
+        if outputs:
+            print(f"   📁 Файлов создано: {len(outputs)}")
+            for p in outputs:
+                if p and p.exists():
+                    size_mb = p.stat().st_size / (1024 * 1024)
+                    print(f"      • {p}  ({size_mb:.2f} MB)")
 
-        # Информация из аудио сервиса
         if self._audio_service and self._audio_service.audio_book:
             audio_book = self._audio_service.audio_book
             if audio_book.final_duration_seconds > 0:
                 print(f"   ⏱️  Длительность: {audio_book.total_duration_formatted}")
 
-        # Время выполнения
         if duration > 0:
             minutes = int(duration // 60)
             seconds = int(duration % 60)
             print(f"   ⚙️  Время обработки: {minutes} мин {seconds} сек")
 
-        # Статистика
         if self.context and self.context.stats:
             print("\n📊 СТАТИСТИКА:")
             for key, value in self.context.stats.items():
@@ -408,6 +419,128 @@ class AudiobookOrchestrator:
 
         print("=" * 60 + "\n")
 
+    def run_per_line(
+        self,
+        input_path: Path,
+        output_path: Path = None,
+        options: ProcessingOptions = None,
+    ) -> bool:
+        """Построчная генерация: каждая непустая строка -> отдельный аудиофайл."""
+        import tempfile
+        import shutil
+
+        self.start_time = time.time()
+        options = options or ProcessingOptions()
+
+        try:
+            text = FileUtils().extract_text(input_path)
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            if not lines:
+                self.debug.log_error("Файл не содержит непустых строк")
+                return False
+
+            out_dir = Path(output_path) if output_path else Path("audio")
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            if self.config.book_config is None:
+                bcp = self.find_book_config(input_path.stem)
+                if bcp:
+                    self.config.load_book_config(config_path=bcp)
+            book_config = self.config.book_config
+
+            ext = {AudioFormat.MP3: ".mp3", AudioFormat.WAV: ".wav"}.get(
+                options.output_format, ".m4a"
+            )
+
+            self.debug.log(
+                f"📖 Построчный режим: {len(lines)} строк -> {out_dir}/", level="INFO"
+            )
+
+            tmp_root = Path(tempfile.mkdtemp(prefix="crabook_lines_"))
+            used_names = set()
+            results = []
+
+            try:
+                for i, line in enumerate(lines):
+                    slug = translit_slug(line) or f"line_{i + 1:04d}"
+                    base, n = slug, 2
+                    while slug in used_names:
+                        slug = f"{base}_{n}"
+                        n += 1
+                    used_names.add(slug)
+
+                    out_file = out_dir / f"{slug}{ext}"
+                    line_file = tmp_root / f"{slug}.txt"
+                    line_file.write_text(line, encoding="utf-8")
+
+                    ctx = ExecutionContext(
+                        input_path=line_file,
+                        output_path=out_file,
+                        options=options,
+                        debug=self.debug,
+                        deps=self.deps,
+                        config=self.config,
+                    )
+                    ctx.book_config = book_config
+                    self.context = ctx
+
+                    if self._text_service is None:
+                        self._text_service = TextPreparationService(ctx)
+                    else:
+                        self._text_service.context = ctx
+                    if self._validation_service is None:
+                        self._validation_service = SSMLValidationService(ctx)
+                    else:
+                        self._validation_service.context = ctx
+                    if self._audio_service is None:
+                        self._audio_service = AudioGenerationService(ctx)
+                    else:
+                        self._audio_service.context = ctx
+
+                    self.debug.log(f"\n[{i + 1}/{len(lines)}] {line}", level="INFO")
+                    try:
+                        self._run_text_preparation(ctx)
+                        if not options.skip_validation:
+                            self._run_validation(ctx)
+                        self._run_audio_generation(ctx)
+                        if ctx.has_errors():
+                            self.debug.log_error(f"Строка {i + 1}: ошибки, пропуск")
+                            continue
+                        produced = list(getattr(self._audio_service, 'output_files', []) or [])
+                        if produced:
+                            results.extend(produced)
+                        else:
+                            results.append(ctx.final_output or out_file)
+                        self.debug.log(f"✅ {out_file.name}", level="INFO")
+                    except Exception as e:
+                        self.debug.log_error(f"Строка {i + 1} не обработана: {e}", e)
+                        continue
+            finally:
+                shutil.rmtree(tmp_root, ignore_errors=True)
+
+            self._print_per_line_summary(results, out_dir)
+            return len(results) > 0
+
+        except Exception as e:
+            self.debug.log_error("Ошибка построчного режима", e, show_traceback=True)
+            return False
+        finally:
+            self.end_time = time.time()
+
+    def _print_per_line_summary(self, results, out_dir):
+        """Сводка построчного режима"""
+        print("\n" + "=" * 60)
+        print("✅ ПОСТРОЧНАЯ ГЕНЕРАЦИЯ ЗАВЕРШЕНА!")
+        print("=" * 60)
+        print(f"   📁 Каталог: {out_dir}/")
+        print(f"   🔊 Файлов создано: {len(results)}")
+        for p in results:
+            if p and p.exists():
+                print(f"      • {p.name}")
+        if self.start_time and self.end_time:
+            dur = self.end_time - self.start_time
+            print(f"   ⚙️  Время: {int(dur // 60)} мин {int(dur % 60)} сек")
+        print("=" * 60 + "\n")
 
 def create_parser() -> argparse.ArgumentParser:
     """Создаёт парсер аргументов командной строки"""
@@ -466,6 +599,10 @@ def create_parser() -> argparse.ArgumentParser:
     )
     proc_group.add_argument(
         "--skip-validation", action="store_true", help="Пропустить валидацию SSML"
+    )
+    proc_group.add_argument(
+        "--per-line", action="store_true",
+        help="Построчная генерация: каждая строка -> отдельный файл (имя = транслит строки)",
     )
 
     # Параметры вывода
@@ -560,6 +697,7 @@ def build_options_from_args(args) -> ProcessingOptions:
     # Обработка
     options.split_chapters = args.split_chapters
     options.skip_validation = args.skip_validation
+    options.per_line = args.per_line
 
     # Вывод
     if args.format:

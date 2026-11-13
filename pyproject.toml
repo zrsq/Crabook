@@ -25,15 +25,16 @@ dependencies = [
     "ruaccent>=1.5",
     "scipy>=1.17.1",
     "torch>=2.2.0",
+    "transliterate>=1.0.3",
 ]
-
-[project.scripts]
-crabook = "crabook:main"
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
+
+[tool.uv]
+package = false
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
@@ -41,3 +42,8 @@ torch = { index = "pytorch-cpu" }
 [build-system]
 requires = ["uv_build>=0.13.0,<0.14.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
