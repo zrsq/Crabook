@@ -18,3 +18,4 @@ project_digest.txt
 *.orig
 *.rej
 .python-version
+.aider*
